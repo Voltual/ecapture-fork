@@ -1,6 +1,10 @@
 name: Release
 on:
+  on:
   push:
+    # 只要有代码推送至以下分支，或者推送了标签，都会触发
+    branches:
+      - master
     tags:
       - "v*"
 
