@@ -70,3 +70,4 @@ make e2e-bash                     # Single module test
 - **Format code**: `make format` (uses `clang-format` with Google style, 120 col limit) for C; standard `gofmt` for Go.
 - **`replace` directive**: `go.mod` replaces `github.com/google/gopacket` with a fork `github.com/cfc4n/gopacket`.
 
+
