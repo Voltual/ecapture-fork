@@ -1,0 +1,463 @@
+// Copyright 2022 CFC4N <cfc4n.cs@gmail.com>. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/* Copyright © 2022 Hengqi Chen */
+#include "ecapture.h"
+#include "go_argument.h"
+#include "tc.h"
+
+#define GOTLS_RANDOM_SIZE 32
+
+// max length is "CLIENT_HANDSHAKE_TRAFFIC_SECRET"=31
+#define MASTER_SECRET_KEY_LEN 32
+#define EVP_MAX_MD_SIZE 64
+#define GOTLS_EVENT_TYPE_WRITE 0
+#define GOTLS_EVENT_TYPE_READ 1
+
+// // TLS record types in golang tls package
+#define recordTypeApplicationData 23
+
+struct go_tls_event {
+    u64 ts_ns;
+    u32 pid;
+    u32 tid;
+    s32 data_len;
+    u8 event_type;
+    u8 pad[3];      // Explicit padding for alignment
+    u32 fd;
+    u8 src_ip[16];  // Support both IPv4 and IPv6
+    u16 src_port;
+    u16 pad2;       // Explicit padding for alignment
+    u8 dst_ip[16];  // Support both IPv4 and IPv6
+    u16 dst_port;
+    u8 ip_version;  // 4 for IPv4, 6 for IPv6
+    u8 pad3;        // Explicit padding for alignment
+    char comm[TASK_COMM_LEN];
+    char data[MAX_DATA_SIZE_OPENSSL];
+};
+
+struct mastersecret_gotls_t {
+    u8 label[MASTER_SECRET_KEY_LEN];
+    u8 labellen;
+    u8 client_random[EVP_MAX_MD_SIZE];
+    u8 client_random_len;
+    u8 secret_[EVP_MAX_MD_SIZE];
+    u8 secret_len;
+};
+
+/////////////////////////BPF MAPS ////////////////////////////////
+
+// bpf map
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
+    __uint(max_entries, 1024);
+} mastersecret_go_events SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
+    __uint(max_entries, 1024);
+} events SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, u32);
+    __type(value, struct go_tls_event);
+    __uint(max_entries, 1);
+} gte_context_gen SEC(".maps");
+
+static __always_inline struct go_tls_event *get_gotls_event() {
+    u32 zero = 0;
+    struct go_tls_event *event = bpf_map_lookup_elem(&gte_context_gen, &zero);
+    if (!event) return 0;
+
+    u64 id = bpf_get_current_pid_tgid();
+    event->ts_ns = bpf_ktime_get_ns();
+    event->pid = id >> 32;
+    event->tid = (__u32)id;
+    event->event_type = GOTLS_EVENT_TYPE_WRITE;
+    event->fd = 0;
+    bpf_get_current_comm(event->comm, sizeof(event->comm));
+
+    // Zero tuple fields explicitly: the struct is reused from a per-cpu map,
+    // so stale values from a previous event would produce incorrect tuples if
+    // fill_fd_and_addr_from_tls_conn() early-returns on any failure path.
+    __builtin_memset(event->src_ip, 0, sizeof(event->src_ip));
+    __builtin_memset(event->dst_ip, 0, sizeof(event->dst_ip));
+    event->src_port = 0;
+    event->dst_port = 0;
+    event->ip_version = 0;
+
+    return event;
+}
+
+static __always_inline void *get_netfd_ptr_from_tls_conn(void *tls_conn_ptr, const char *caller) {
+    if (!tls_conn_ptr) {
+        return NULL;
+    }
+
+    // Step 1: tls.Conn.conn is the first field (offset 0), it's an interface (16 bytes: type ptr + data ptr)
+    // Read the data pointer (second 8 bytes of the interface)
+    void *net_conn_ptr = NULL;
+    int ret = bpf_probe_read_user(&net_conn_ptr, sizeof(net_conn_ptr), (void *)((u64)tls_conn_ptr + 8));
+    if (ret < 0 || !net_conn_ptr) {
+        return NULL;
+    }
+
+    // Step 2: net.TCPConn.conn (embedded field at offset 0)
+    // net.conn.fd is *netFD at offset 0
+    void *netfd_ptr = NULL;
+    ret = bpf_probe_read_user(&netfd_ptr, sizeof(netfd_ptr), net_conn_ptr);
+    if (ret < 0 || !netfd_ptr) {
+        return NULL;
+    }
+
+    return netfd_ptr;
+}
+
+static __always_inline int extract_fd_from_netfd_ptr(void *netfd_ptr) {
+    // net.netFD.pfd is internal/poll.FD (VALUE type at offset 0, size 56)
+    // internal/poll.FD structure:
+    //   fdmu fdMutex  // offset 0, size 16 (state uint64 + rsema uint32 + wsema uint32)
+    //   Sysfd int     // offset 16, size 8 (on 64-bit systems, Go's int is 8 bytes!)
+    // IMPORTANT: Use s64 (8 bytes) not int (4 bytes) because Go's int is 8 bytes on 64-bit
+    s64 fd = 0;
+    int ret = bpf_probe_read_user(&fd, sizeof(fd), (void *)((u64)netfd_ptr + 16));
+    if (ret < 0 || fd < 0) {
+        return 0;
+    }
+    return (int)fd;
+}
+
+// Extract IP and port from an already-resolved net.netFD pointer.
+//
+// net.netFD layout (from net/fd_posix.go, 64-bit only):
+//   pfd poll.FD        // offset 0, size 56
+//   family int         // offset 56, size 8
+//   sotype int         // offset 64, size 8
+//   isConnected bool   // offset 72, size 1
+//   pad [7]byte        // offset 73, size 7
+//   net string         // offset 80, size 16 (ptr + len)
+//   laddr Addr         // offset 96, size 16 (interface: itab ptr + data ptr)
+//   raddr Addr         // offset 112, size 16 (interface: itab ptr + data ptr)
+//
+// net.TCPAddr layout:
+//   IP   net.IP  // offset 0,  []byte: ptr(8)+len(8)+cap(8) = 24 bytes
+//   Port int     // offset 24, size 8
+//   Zone string  // offset 32, size 16
+static __always_inline void extract_addr_from_netfd_ptr(void *netfd_ptr,
+                                                         u8 *src_ip, u16 *src_port,
+                                                         u8 *dst_ip, u16 *dst_port,
+                                                         u8 *ip_version) {
+    // Read laddr data ptr (interface layout: itab_ptr+8 = data_ptr)
+    void *laddr_ptr = NULL;
+    int ret = bpf_probe_read_user(&laddr_ptr, sizeof(laddr_ptr),
+                                   (void *)((u64)netfd_ptr + 96 + 8));
+    if (ret < 0 || !laddr_ptr) {
+        return;
+    }
+
+    // Read raddr data ptr at offset 112
+    void *raddr_ptr = NULL;
+    ret = bpf_probe_read_user(&raddr_ptr, sizeof(raddr_ptr),
+                              (void *)((u64)netfd_ptr + 112 + 8));
+    if (ret < 0 || !raddr_ptr) {
+        return;
+    }
+
+    // TCPAddr.IP is a []byte slice at offset 0: ptr(8)+len(8)+cap(8)
+    void *lip_ptr = NULL, *rip_ptr = NULL;
+    u64 lip_len = 0, rip_len = 0;
+
+    ret = bpf_probe_read_user(&lip_ptr, sizeof(lip_ptr), laddr_ptr);
+    if (ret < 0) return;
+    ret = bpf_probe_read_user(&lip_len, sizeof(lip_len), (void *)((u64)laddr_ptr + 8));
+    if (ret < 0) return;
+    ret = bpf_probe_read_user(&rip_ptr, sizeof(rip_ptr), raddr_ptr);
+    if (ret < 0) return;
+    ret = bpf_probe_read_user(&rip_len, sizeof(rip_len), (void *)((u64)raddr_ptr + 8));
+    if (ret < 0) return;
+
+    u8 version = 0;
+    if (lip_len == 4 && rip_len == 4) {
+        version = 4;
+    } else if (lip_len == 16 && rip_len == 16) {
+        version = 6;
+    } else {
+        return;
+    }
+
+    debug_bpf_printk("extract_addr: IP version=%d, lip_len=%llu\n", version, lip_len);
+
+    if (version == 4) {
+        ret = bpf_probe_read_user(src_ip, 4, lip_ptr);
+        if (ret < 0) return;
+        ret = bpf_probe_read_user(dst_ip, 4, rip_ptr);
+        if (ret < 0) return;
+    } else {
+        ret = bpf_probe_read_user(src_ip, 16, lip_ptr);
+        if (ret < 0) return;
+        ret = bpf_probe_read_user(dst_ip, 16, rip_ptr);
+        if (ret < 0) return;
+    }
+
+    // TCPAddr.Port is at offset 24
+    s64 lport = 0, rport = 0;
+    ret = bpf_probe_read_user(&lport, sizeof(lport), (void *)((u64)laddr_ptr + 24));
+    if (ret < 0) return;
+    ret = bpf_probe_read_user(&rport, sizeof(rport), (void *)((u64)raddr_ptr + 24));
+    if (ret < 0) return;
+
+    *src_port = (u16)lport;
+    *dst_port = (u16)rport;
+    *ip_version = version;
+
+    debug_bpf_printk("extract_addr: success version=%d sport=%u\n", version, (u16)lport);
+}
+
+// Resolve netfd_ptr once from tls_conn_ptr, then fill fd + addr into the event.
+// This avoids walking tls.Conn -> net.Conn -> netFD twice per event.
+static __always_inline void fill_fd_and_addr_from_tls_conn(void *tls_conn_ptr,
+                                                             u32 *fd_out,
+                                                             u8 *src_ip, u16 *src_port,
+                                                             u8 *dst_ip, u16 *dst_port,
+                                                             u8 *ip_version,
+                                                             const char *caller) {
+    void *netfd_ptr = get_netfd_ptr_from_tls_conn(tls_conn_ptr, caller);
+    if (!netfd_ptr) {
+        return;
+    }
+    debug_bpf_printk("fill_fd_and_addr [%s]: netfd_ptr=%p\n", caller, netfd_ptr);
+
+    *fd_out = (u32)extract_fd_from_netfd_ptr(netfd_ptr);
+    extract_addr_from_netfd_ptr(netfd_ptr, src_ip, src_port, dst_ip, dst_port, ip_version);
+}
+
+static __always_inline int gotls_write(struct pt_regs *ctx, bool is_register_abi) {
+    if (!passes_filter(ctx)) {
+        return 0;
+    }
+    s32 record_type, len;
+    const char *str;
+    void *record_type_ptr;
+    void *len_ptr;
+    void *tls_conn_ptr;
+
+    tls_conn_ptr = (void *)go_get_argument(ctx, is_register_abi, 1);
+
+    record_type_ptr = (void *)go_get_argument(ctx, is_register_abi, 2);
+    bpf_probe_read_kernel(&record_type, sizeof(record_type), (void *)&record_type_ptr);
+    str = (void *)go_get_argument(ctx, is_register_abi, 3);
+    len_ptr = (void *)go_get_argument(ctx, is_register_abi, 4);
+    bpf_probe_read_kernel(&len, sizeof(len), (void *)&len_ptr);
+
+    if (len == 0) {
+        return 0;
+    }
+    debug_bpf_printk("gotls_write record_type:%d, len:%d\n", record_type, len);
+    if (record_type != recordTypeApplicationData) {
+        return 0;
+    }
+
+    struct go_tls_event *event = get_gotls_event();
+    if (!event) {
+        return 0;
+    }
+
+    fill_fd_and_addr_from_tls_conn(tls_conn_ptr, &event->fd,
+                                    event->src_ip, &event->src_port,
+                                    event->dst_ip, &event->dst_port,
+                                    &event->ip_version, "WRITE");
+
+    event->data_len =
+        (len < MAX_DATA_SIZE_OPENSSL ? (len & (MAX_DATA_SIZE_OPENSSL - 1))
+                                     : MAX_DATA_SIZE_OPENSSL);
+    int ret = bpf_probe_read_user(&event->data, event->data_len, (void *)str);
+    if (ret < 0) {
+        return 0;
+    }
+    debug_bpf_printk("gotls_write: pid=%u fd=%u ip_version=%u\n",
+                     event->pid, event->fd, event->ip_version);
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(struct go_tls_event));
+    return 0;
+}
+
+// capture golang tls plaintext, supported golang stack-based ABI (go version
+// >= 1.17) type recordType uint8 writeRecordLocked(typ recordType, data []byte)
+SEC("uprobe/gotls_write_register")
+int gotls_write_register(struct pt_regs *ctx) { return gotls_write(ctx, true); }
+
+// capture golang tls plaintext, supported golang stack-based ABI (go version
+// < 1.17) type recordType uint8 writeRecordLocked(typ recordType, data []byte)
+SEC("uprobe/gotls_write_stack")
+int gotls_write_stack(struct pt_regs *ctx) { return gotls_write(ctx, false); }
+
+// crypto/tls/conn.go
+// func (c *Conn) Read(b []byte) (int, error)
+static __always_inline int gotls_read(struct pt_regs *ctx, bool is_register_abi) {
+    if (!passes_filter(ctx)) {
+        return 0;
+    }
+    s32 record_type, ret_len;
+    const char *str;
+    void *len_ptr, *ret_len_ptr;
+    void *tls_conn_ptr;
+
+    tls_conn_ptr = (void *)go_get_argument(ctx, false, 1);
+
+    // golang
+    // uretprobe的实现，为选择目标函数中，汇编指令的RET指令地址，即调用子函数的返回后的触发点，此时，此函数参数等地址存放在SP(stack
+    // Point)上，故使用stack方式读取
+    // str 是 Golang TLS  *Conn.Read函数第一个参数b []byte的类型，对应runtime中
+
+    str = (void *)go_get_argument(ctx, false, 2);
+    if (is_register_abi) {
+        ret_len_ptr = (void *)go_get_argument(ctx, is_register_abi, 1);
+    } else {
+        // by stack, Read函数的返回值第一个是int类型，存放在栈里的顺序是5
+        ret_len_ptr = (void *)go_get_argument(ctx, is_register_abi, 5);
+    }
+    bpf_probe_read_kernel(&ret_len, sizeof(ret_len), (void *)&ret_len_ptr);
+    debug_bpf_printk("gotls_read event, str:%p ret_len_ptr:%d, ret_len:%d\n", str, ret_len_ptr, ret_len);
+    if (str <= 0) {
+        return 0;
+    }
+    if (ret_len <= 0) {
+        return 0;
+    }
+
+    struct go_tls_event *event = get_gotls_event();
+    if (!event) {
+        return 0;
+    }
+
+    fill_fd_and_addr_from_tls_conn(tls_conn_ptr, &event->fd,
+                                    event->src_ip, &event->src_port,
+                                    event->dst_ip, &event->dst_port,
+                                    &event->ip_version, "READ");
+
+    event->data_len =
+        (ret_len < MAX_DATA_SIZE_OPENSSL ? (ret_len & (MAX_DATA_SIZE_OPENSSL - 1))
+                                     : MAX_DATA_SIZE_OPENSSL);
+    event->event_type = GOTLS_EVENT_TYPE_READ;
+    int ret = bpf_probe_read_user(&event->data, event->data_len, (void *)str);
+    if (ret < 0) {
+        return 0;
+    }
+    debug_bpf_printk("gotls_read: pid=%u fd=%u ip_version=%u\n",
+                     event->pid, event->fd, event->ip_version);
+
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, event, sizeof(struct go_tls_event));
+    return 0;
+}
+
+// capture golang tls plaintext, supported golang stack-based ABI (go version
+// < 1.17) func (c *Conn) Read(b []byte) (int, error)
+
+SEC("uprobe/gotls_read_register")
+int gotls_read_register(struct pt_regs *ctx) { return gotls_read(ctx, true); }
+
+SEC("uprobe/gotls_read_stack")
+int gotls_read_stack(struct pt_regs *ctx) { return gotls_read(ctx, false); }
+
+/*
+ * crypto/tls/common.go
+ * func (c *Config) writeKeyLog(label string, clientRandom, secret []byte) error
+ */
+static __always_inline int gotls_mastersecret(struct pt_regs *ctx, bool is_register_abi) {
+    if (!passes_filter(ctx)) {
+        return 0;
+    }
+    //    const char *label, *clientrandom, *secret;
+    void *lab_ptr, *cr_ptr, *secret_ptr;
+    void *lab_len_ptr, *cr_len_ptr, *secret_len_ptr;
+    s32 lab_len, cr_len, secret_len;
+
+    /*
+     *
+     * in golang struct, slice header like this
+     * type slice struct {
+     * 	array unsafe.Pointer
+     * 	len   int
+     * 	cap   int
+     * }
+     * so, arument index are in the order one by one
+     *
+     */
+    lab_ptr = (void *)go_get_argument(ctx, is_register_abi, 2);
+    lab_len_ptr = (void *)go_get_argument(ctx, is_register_abi, 3);
+    cr_ptr = (void *)go_get_argument(ctx, is_register_abi, 4);
+    cr_len_ptr = (void *)go_get_argument(ctx, is_register_abi, 5);
+    secret_ptr = (void *)go_get_argument(ctx, is_register_abi, 7);
+    secret_len_ptr = (void *)go_get_argument(ctx, is_register_abi, 8);
+
+    bpf_probe_read_kernel(&lab_len, sizeof(lab_len), (void *)&lab_len_ptr);
+    bpf_probe_read_kernel(&cr_len, sizeof(lab_len), (void *)&cr_len_ptr);
+    bpf_probe_read_kernel(&secret_len, sizeof(lab_len), (void *)&secret_len_ptr);
+
+    if (lab_len <= 0 || cr_len <= 0 || secret_len <= 0) {
+        return 0;
+    }
+
+    debug_bpf_printk(
+        "gotls_mastersecret read params length success, lab_len:%d, cr_len:%d, "
+        "secret_len:%d\n",
+        lab_len, cr_len, secret_len);
+
+    struct mastersecret_gotls_t mastersecret_gotls = {};
+    mastersecret_gotls.labellen = lab_len;
+    mastersecret_gotls.client_random_len = cr_len;
+    mastersecret_gotls.secret_len = secret_len;
+    int ret = bpf_probe_read_user_str(&mastersecret_gotls.label, sizeof(mastersecret_gotls.label), (void *)lab_ptr);
+    if (ret < 0) {
+        debug_bpf_printk(
+            "gotls_mastersecret read mastersecret label failed, ret:%d, "
+            "lab_ptr:%p\n",
+            ret, lab_ptr);
+        return 0;
+    }
+
+    debug_bpf_printk("gotls_mastersecret read mastersecret label:%s\n", mastersecret_gotls.label);
+    ret = bpf_probe_read_user(
+        &mastersecret_gotls.client_random, sizeof(mastersecret_gotls.client_random), (void *)cr_ptr);
+    if (ret < 0) {
+        debug_bpf_printk(
+            "gotls_mastersecret read mastersecret client_random failed, "
+            "ret:%d, cr_ptr:%p\n",
+            ret, cr_ptr);
+        return 0;
+    }
+
+    ret = bpf_probe_read_user(&mastersecret_gotls.secret_, sizeof(mastersecret_gotls.secret_), (void *)secret_ptr);
+    if (ret < 0) {
+        debug_bpf_printk(
+            "gotls_mastersecret read mastersecret secret_ failed, ret:%d, "
+            "secret_ptr:%p\n",
+            ret, secret_ptr);
+        return 0;
+    }
+
+    bpf_perf_event_output(
+        ctx, &mastersecret_go_events, BPF_F_CURRENT_CPU, &mastersecret_gotls, sizeof(struct mastersecret_gotls_t));
+    return 0;
+}
+
+SEC("uprobe/gotls_mastersecret_register")
+int gotls_mastersecret_register(struct pt_regs *ctx) { return gotls_mastersecret(ctx, true); }
+
+SEC("uprobe/gotls_mastersecret_stack")
+int gotls_mastersecret_stack(struct pt_regs *ctx) { return gotls_mastersecret(ctx, false); }

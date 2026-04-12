@@ -1,0 +1,192 @@
+// Copyright 2022 CFC4N <cfc4n.cs@gmail.com>. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "ecapture.h"
+#include "include/openssl_masterkey_common.h"
+
+// https://wiki.openssl.org/index.php/TLS1.3
+// Only OpenSSL >= 1.1.1 supports TLS 1.3
+
+/***********************************************************
+ * BPF probe function (OpenSSL 1.x)
+ ***********************************************************/
+SEC("uprobe/SSL_write_key")
+int probe_ssl_master_key(struct pt_regs *ctx) {
+    u64 current_pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = current_pid_tgid >> 32;
+
+    if (!passes_filter(ctx)) {
+        return 0;
+    }
+    debug_bpf_printk("openssl uprobe/SSL_write masterKey PID :%d\n", pid);
+
+    // mastersecret_t sent to userspace
+    struct mastersecret_t *mastersecret = make_event();
+    // Get a ssl_st pointer
+    void *ssl_st_ptr = (void *)PT_REGS_PARM1(ctx);
+    if (!mastersecret) {
+        debug_bpf_printk("mastersecret is null\n");
+        return 0;
+    }
+    u64 *ssl_version_ptr = (u64 *)(ssl_st_ptr + SSL_ST_VERSION);
+    // Get a ssl_session_st pointer
+    u64 *ssl_s3_st_ptr = (u64 *)(ssl_st_ptr + SSL_ST_S3);
+
+    // Get SSL->version pointer
+    int version;
+    u64 address;
+    int ret = bpf_probe_read_user(&version, sizeof(version), (void *)ssl_version_ptr);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read tls_version failed, ret :%d\n", ret);
+        return 0;
+    }
+    mastersecret->version = version;
+    debug_bpf_printk("TLS version :%d\n", mastersecret->version);
+
+    // Get ssl3_state_st pointer
+    ret = bpf_probe_read_user(&address, sizeof(address), ssl_s3_st_ptr);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read ssl_s3_st_ptr pointer failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    // Get ssl3_state_st->client_random pointer
+    u64 *s3_st_client_random_ptr = (u64 *)(address + SSL3_STATE_ST_CLIENT_RANDOM);
+    ret = bpf_probe_read_user(
+        &mastersecret->client_random, sizeof(mastersecret->client_random), (void *)s3_st_client_random_ptr);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read ssl3_state_st struct failed, ret :%d\n", ret);
+        return 0;
+    }
+    debug_bpf_printk("client_random: %x %x %x\n", mastersecret->client_random[0], mastersecret->client_random[1],
+        mastersecret->client_random[2]);
+
+    // Get ssl_session_st pointer
+    u64 *ssl_session_st_ptr;
+    u64 ssl_session_st_addr;
+
+    ssl_session_st_ptr = (u64 *)(ssl_st_ptr + SSL_ST_SESSION);
+    ret = bpf_probe_read_user(&ssl_session_st_addr, sizeof(ssl_session_st_addr), ssl_session_st_ptr);
+    if (ret) {
+        debug_bpf_printk("(OPENSSL) bpf_probe_read ssl_session_st_ptr failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    ///////////////////////// get TLS 1.2 master secret ////////////////////
+    if (mastersecret->version != TLS1_3_VERSION) {
+        void *ms_ptr = (void *)(ssl_session_st_addr + SSL_SESSION_ST_MASTER_KEY);
+        ret = bpf_probe_read_user(&mastersecret->master_key, sizeof(mastersecret->master_key), ms_ptr);
+        if (ret) {
+            debug_bpf_printk(
+                "bpf_probe_read MASTER_KEY_OFFSET failed, ms_ptr:%llx, ret "
+                ":%d\n",
+                ms_ptr, ret);
+            return 0;
+        }
+
+        debug_bpf_printk("master_key: %x %x %x\n", mastersecret->master_key[0], mastersecret->master_key[1],
+            mastersecret->master_key[2]);
+
+        bpf_perf_event_output(
+            ctx, &mastersecret_events, BPF_F_CURRENT_CPU, mastersecret, sizeof(struct mastersecret_t));
+        return 0;
+    }
+
+    ///////////////////////// get TLS 1.3 master secret ////////////////////
+    // Get SSL_SESSION->cipher pointer
+    u64 *ssl_cipher_st_ptr = (u64 *)(ssl_session_st_addr + SSL_SESSION_ST_CIPHER);
+
+    // get cipher_suite_st pointer
+    debug_bpf_printk("cipher_suite_st pointer: %x\n", ssl_cipher_st_ptr);
+    ret = bpf_probe_read_user(&address, sizeof(address), ssl_cipher_st_ptr);
+    if (ret || address == 0) {
+        debug_bpf_printk("bpf_probe_read ssl_cipher_st_ptr failed, ret :%d, address:%x\n", ret, address);
+        // return 0;
+        void *cipher_id_ptr = (void *)(ssl_session_st_addr + SSL_SESSION_ST_CIPHER_ID);
+        ret = bpf_probe_read_user(&mastersecret->cipher_id, sizeof(mastersecret->cipher_id), cipher_id_ptr);
+        if (ret) {
+            debug_bpf_printk(
+                "bpf_probe_read SSL_SESSION_ST_CIPHER_ID failed from "
+                "SSL_SESSION->cipher_id, ret :%d\n",
+                ret);
+            return 0;
+        }
+    } else {
+        debug_bpf_printk("cipher_suite_st value: %x\n", address);
+        void *cipher_id_ptr = (void *)(address + SSL_CIPHER_ST_ID);
+        ret = bpf_probe_read_user(&mastersecret->cipher_id, sizeof(mastersecret->cipher_id), cipher_id_ptr);
+        if (ret) {
+            debug_bpf_printk(
+                "bpf_probe_read SSL_CIPHER_ST_ID failed from "
+                "ssl_cipher_st->id, ret :%d\n",
+                ret);
+            return 0;
+        }
+    }
+
+    debug_bpf_printk("cipher_id: %d\n", mastersecret->cipher_id);
+
+    //////////////////// TLS 1.3 master secret ////////////////////////
+
+    void *es_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_EARLY_SECRET);
+    ret = bpf_probe_read_user(&mastersecret->early_secret, sizeof(mastersecret->early_secret), (void *)es_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_EARLY_SECRET failed, ret :%d\n", ret);
+        // If the read fails, it may be because TLS 1.3 early data is not enabled, so this error can be ignored
+    }
+
+    void *hs_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_HANDSHAKE_SECRET);
+    ret = bpf_probe_read_user(
+        &mastersecret->handshake_secret, sizeof(mastersecret->handshake_secret), (void *)hs_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_HANDSHAKE_SECRET failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    void *hth_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_HANDSHAKE_TRAFFIC_HASH);
+    ret = bpf_probe_read_user(
+        &mastersecret->handshake_traffic_hash, sizeof(mastersecret->handshake_traffic_hash), (void *)hth_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_HANDSHAKE_TRAFFIC_HASH failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    void *cats_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_CLIENT_APP_TRAFFIC_SECRET);
+    ret = bpf_probe_read_user(&mastersecret->client_app_traffic_secret, sizeof(mastersecret->client_app_traffic_secret),
+        (void *)cats_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_CLIENT_APP_TRAFFIC_SECRET failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    void *sats_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_SERVER_APP_TRAFFIC_SECRET);
+    ret = bpf_probe_read_user(&mastersecret->server_app_traffic_secret, sizeof(mastersecret->server_app_traffic_secret),
+        (void *)sats_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_SERVER_APP_TRAFFIC_SECRET failed, ret :%d\n", ret);
+        return 0;
+    }
+
+    void *ems_ptr_tls13 = (void *)(ssl_st_ptr + SSL_ST_EXPORTER_MASTER_SECRET);
+    ret = bpf_probe_read_user(
+        &mastersecret->exporter_master_secret, sizeof(mastersecret->exporter_master_secret), (void *)ems_ptr_tls13);
+    if (ret) {
+        debug_bpf_printk("bpf_probe_read SSL_ST_EXPORTER_MASTER_SECRET failed, ret :%d\n", ret);
+        return 0;
+    }
+    debug_bpf_printk("*****master_secret*****: %x %x %x\n", mastersecret->master_key[0], mastersecret->master_key[1],
+        mastersecret->master_key[2]);
+    bpf_perf_event_output(ctx, &mastersecret_events, BPF_F_CURRENT_CPU, mastersecret, sizeof(struct mastersecret_t));
+    return 0;
+}

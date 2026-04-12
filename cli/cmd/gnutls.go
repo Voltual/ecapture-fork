@@ -1,0 +1,79 @@
+//go:build !ecap_android
+// +build !ecap_android
+
+// Copyright 2022 CFC4N <cfc4n.cs@gmail.com>. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/gojue/ecapture/internal/factory"
+	gnutlsProbe "github.com/gojue/ecapture/internal/probe/gnutls"
+)
+
+var gnutlsConfig = gnutlsProbe.NewConfig()
+
+// gnutlsCmd represents the gnutls command
+// Now available on both Linux and Android (via Termux: pkg install gnutls)
+var gnutlsCmd = &cobra.Command{
+	Use:     "gnutls",
+	Aliases: []string{"gnu"},
+	Short:   "capture gnutls text content without CA cert for gnutls libraries.",
+	Long: `use eBPF uprobe/TC to capture process event data.
+ecapture gnutls
+ecapture gnutls --hex --pid=3423
+ecapture gnutls -l save.log --pid=3423
+ecapture gnutls --gnutls=/lib/x86_64-linux-gnu/libgnutls.so
+ecapture gnutls -m keylog -k ecapture_gnutls_key.log --ssl_version=3.7.9
+ecapture gnutls -m pcap --pcapfile save.pcapng -i eth0 --gnutls=/lib/x86_64-linux-gnu/libgnutls.so tcp port 443
+
+Android (Termux):
+ecapture gnutls --gnutls=/data/data/com.termux/files/usr/lib/libgnutls.so
+`,
+	RunE: gnuTlsCommandFunc,
+}
+
+func init() {
+	gnutlsCmd.PersistentFlags().StringVar(&gnutlsConfig.GnutlsPath, "gnutls", "", "libgnutls.so file path, will automatically find it from curl default.")
+	gnutlsCmd.PersistentFlags().StringVarP(&gnutlsConfig.CaptureMode, "model", "m", "text", "capture model, such as : text, pcap/pcapng, key/keylog")
+	gnutlsCmd.PersistentFlags().StringVarP(&gnutlsConfig.KeylogFile, "keylogfile", "k", "ecapture_gnutls_key.log", "The file stores SSL/TLS keys, and eCapture captures these keys during encrypted traffic communication and saves them to the file.")
+	gnutlsCmd.PersistentFlags().StringVarP(&gnutlsConfig.PcapFile, "pcapfile", "w", "save.pcapng", "write the raw packets to file as pcapng format.")
+	gnutlsCmd.PersistentFlags().StringVarP(&gnutlsConfig.Ifname, "ifname", "i", "", "(TC Classifier) Interface name on which the probe will be attached.")
+	gnutlsCmd.PersistentFlags().StringVar(&gnutlsConfig.GnuVersion, "ssl_version", "", "GnuTLS version, e.g: --ssl_version=\"3.7.9\"")
+	gnutlsCmd.PersistentFlags().StringVar(&gnutlsConfig.CGroupPath, "cgroup_path", "", "cgroup v2 path for container/process filtering. Empty disables cgroup filtering.")
+	rootCmd.AddCommand(gnutlsCmd)
+}
+
+// gnuTlsCommandFunc executes the "gnutls" command using the new probe architecture.
+func gnuTlsCommandFunc(command *cobra.Command, args []string) error {
+	if gnutlsConfig.PcapFilter == "" && len(args) != 0 {
+		gnutlsConfig.PcapFilter = strings.Join(args, " ")
+	}
+
+	// Set global config to gnutls-specific config
+	gnutlsConfig.SetPid(globalConf.Pid)
+	gnutlsConfig.SetUid(globalConf.Uid)
+	gnutlsConfig.SetDebug(globalConf.Debug)
+	gnutlsConfig.SetHex(globalConf.IsHex)
+	gnutlsConfig.SetBTF(globalConf.BtfMode)
+	gnutlsConfig.SetPerCpuMapSize(globalConf.PerCpuMapSize)
+	gnutlsConfig.SetTruncateSize(globalConf.TruncateSize)
+
+	// Run probe using the common entry point
+	return runProbe(factory.ProbeTypeGnuTLS, gnutlsConfig)
+}
