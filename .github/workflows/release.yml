@@ -59,30 +59,30 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
-# 关键修正：处理你提供的 kheaders.tar.xz
-- name: Prepare Custom Kernel Headers
-  id: kernel_headers
-  run: |
-    if [ -f "./kheaders.tar.xz" ]; then
-      echo "✅ Found custom kheaders.tar.xz"
-      mkdir -p ${{ github.workspace }}/custom_headers
-      tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
+    # 关键修正：处理你提供的 kheaders.tar.xz
+    - name: Prepare Custom Kernel Headers
+      id: kernel_headers
+      run: |
+        if [ -f "./kheaders.tar.xz" ]; then
+          echo "✅ Found custom kheaders.tar.xz"
+                mkdir -p ${{ github.workspace }}/custom_headers
+                tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
       
       # 自动定位包含 'include' 目录的实际根路径
       # kheaders.tar.xz 解压后可能包含嵌套路径
-      REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name "include" -type d -print -quit | sed 's/\/include$//')
+                REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name "include" -type d -print -quit | sed 's/\/include$//')
       
-      echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
-      echo "KERN_SRC_PATH=$REAL_PATH" >> $GITHUB_ENV
-      echo "KERN_BUILD_PATH=$REAL_PATH" >> $GITHUB_ENV
-      echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
+                echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
+                echo "KERN_SRC_PATH=$REAL_PATH" >> $GITHUB_ENV
+                echo "KERN_BUILD_PATH=$REAL_PATH" >> $GITHUB_ENV
+                echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
       
-      echo "Headers located at: $REAL_PATH"
-    else
-      echo "⚠️ kheaders.tar.xz not found, falling back to generic build"
-      echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
-    fi
-  shell: bash
+                echo "Headers located at: $REAL_PATH"
+              else
+                echo "⚠️ kheaders.tar.xz not found, falling back to generic build"
+                echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
+              fi
+            shell: bash
 
 - name: Release arm64 (Non-CO-RE / nocore)
   if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
