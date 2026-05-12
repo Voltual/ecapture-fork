@@ -85,20 +85,36 @@ jobs:
         shell: bash
 
       - name: Release arm64 (Non-CO-RE / nocore)
-        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
-        run: |
-          # 关键点：
-          # 1. 覆盖 KERNEL_HEADER_GEN 变量为空，防止去头文件目录运行不存在的 make prepare
-          # 2. 设置 CROSS_ARCH=arm64
-          make clean
-          make nocore \
-            CROSS_ARCH=arm64 \
-            SNAPSHOT_VERSION=${{ github.ref_name }} \
-            KERNEL_HEADER_GEN="true" \
-            LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }}
-          
-          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
-        shell: bash
+  if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
+  run: |
+    # 1. 强制初始化子模块，确保 lib/libpcap 存在
+    git submodule update --init --recursive
+
+    # 2. 获取 Clang 内部头文件路径 (解决 stdarg.h 缺失问题)
+    CLANG_INTERNAL_INC=$(clang -print-resource-dir)/include
+    echo "Clang internal include path: $CLANG_INTERNAL_INC"
+
+    # 3. 执行编译
+    # 我们把 Clang 内部路径加入 EXTRA_CFLAGS_NOCORE
+    # 并且通过环境变量确保 Makefile 使用正确的头文件路径
+    make clean
+    make nocore \
+      CROSS_ARCH=arm64 \
+      SNAPSHOT_VERSION=${{ github.ref_name }} \
+      KERNEL_HEADER_GEN="true" \
+      EXTRA_CFLAGS_NOCORE="-isystem $CLANG_INTERNAL_INC" \
+      LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }} \
+      KERN_SRC_PATH=${{ env.LINUX_SOURCE_PATH }} \
+      KERN_BUILD_PATH=${{ env.LINUX_SOURCE_PATH }}
+
+    # 检查编译结果并重命名
+    if [ -f "bin/ecapture" ]; then
+      mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
+    else
+      echo "❌ Build failed, bin/ecapture not found"
+      exit 1
+    fi
+  shell: bash
 
       # 如果没有自定义头文件，则走原有的 release 流程（依赖 BTF）
       - name: Standard Release amd64
