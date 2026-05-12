@@ -59,52 +59,46 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
-      # 关键步骤：处理你提供的 kheaders.tar.xz
-      # 假设该文件存放在仓库根目录，或者通过其他方式下载
-      - name: Prepare Custom Kernel Headers
-        id: kernel_headers
-        run: |
-          if [ -f "./kheaders.tar.xz" ]; then
-            echo "✅ Found custom kheaders.tar.xz"
-            mkdir -p ${{ github.workspace }}/custom_headers
-            tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
-            
-            # 自动寻找包含 Makefile 的目录作为源码根目录
-            REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name Makefile -exec dirname {} + | head -n 1)
-            echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
-            echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
-            
-            # 执行内核头文件预处理（对应 Makefile 中的 prepare 目标）
-            cd $REAL_PATH
-            # 针对你的目标架构执行 prepare，这里以 arm64 为例
-            # 如果是 Android 环境，可能需要特定的 ARCH 参数
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
-          else
-            echo "⚠️ kheaders.tar.xz not found in root, falling back to generic build"
-            echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
-          fi
-        shell: bash
+# 关键修正：处理你提供的 kheaders.tar.xz
+- name: Prepare Custom Kernel Headers
+  id: kernel_headers
+  run: |
+    if [ -f "./kheaders.tar.xz" ]; then
+      echo "✅ Found custom kheaders.tar.xz"
+      mkdir -p ${{ github.workspace }}/custom_headers
+      tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
+      
+      # 自动定位包含 'include' 目录的实际根路径
+      # kheaders.tar.xz 解压后可能包含嵌套路径
+      REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name "include" -type d -print -quit | sed 's/\/include$//')
+      
+      echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
+      echo "KERN_SRC_PATH=$REAL_PATH" >> $GITHUB_ENV
+      echo "KERN_BUILD_PATH=$REAL_PATH" >> $GITHUB_ENV
+      echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
+      
+      echo "Headers located at: $REAL_PATH"
+    else
+      echo "⚠️ kheaders.tar.xz not found, falling back to generic build"
+      echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
+    fi
+  shell: bash
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Release arm64 (Non-CO-RE / nocore)
-        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
-        run: |
-          make clean
-          # 使用 nocore 目标编译
-          # 它会使用我们设置好的 LINUX_SOURCE_PATH 环境变量
-          CROSS_ARCH=arm64 SNAPSHOT_VERSION=${{ github.ref_name }} make nocore
-          
-          # 将生成的二进制重命名，方便区分
-          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
-        shell: bash
+- name: Release arm64 (Non-CO-RE / nocore)
+  if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
+  run: |
+    # 关键点：
+    # 1. 覆盖 KERNEL_HEADER_GEN 变量为空，防止去头文件目录运行不存在的 make prepare
+    # 2. 设置 CROSS_ARCH=arm64
+    make clean
+    make nocore \
+      CROSS_ARCH=arm64 \
+      SNAPSHOT_VERSION=${{ github.ref_name }} \
+      KERNEL_HEADER_GEN="true" \
+      LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }}
+    
+    mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
+  shell: bash
 
       # 如果没有自定义头文件，则走原有的 release 流程（依赖 BTF）
       - name: Standard Release amd64
