@@ -1,8 +1,6 @@
 name: Release
 on:
-  on:
   push:
-    # 只要有代码推送至以下分支，或者推送了标签，都会触发
     branches:
       - master
     tags:
@@ -13,7 +11,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
   build-on-ubuntu2204:
     runs-on: ubuntu-22.04
     name: release Linux/Android Version (amd64/arm64)
@@ -21,24 +18,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.6'
+
       - name: Check Release Type
         id: release_type
         run: |
           TAG_NAME=${{ github.ref_name }}
           if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-            echo "RELEASE_TYPE=stable" >> $GITHUB_OUTPUT
-            echo "📦 Stable release detected: $TAG_NAME"
           elif [[ "$TAG_NAME" =~ (alpha|beta|rc) ]]; then
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
-            echo "RELEASE_TYPE=prerelease" >> $GITHUB_OUTPUT
-            echo "🚧 Pre-release detected: $TAG_NAME"
           else
             echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-            echo "RELEASE_TYPE=stable" >> $GITHUB_OUTPUT
-            echo "📦 Release: $TAG_NAME"
           fi
         shell: bash
+
       - name: Install Compilers
         run: |
           sudo apt-get update
@@ -49,28 +42,49 @@ jobs:
             llvm-14 \
             clang-14 \
             linux-tools-common \
-            linux-tools-generic \
             gcc \
             gcc-aarch64-linux-gnu \
-            linux-source
-          for tool in "clang" "llc" "llvm-strip"
+            libpcap-dev
+          
+          # 建立工具软链接
+          for tool in "clang" "llc" "llvm-strip" "bpftool"
           do
             sudo rm -f /usr/bin/$tool
-            sudo ln -s /usr/bin/$tool-14 /usr/bin/$tool
+            sudo ln -s /usr/bin/$tool-14 /usr/bin/$tool || true
           done
-          cd /usr/src
-          source_file=$(find . -maxdepth 1 -name "*linux-source*.tar.bz2")
-          source_dir=$(echo "$source_file" | sed 's/\.tar\.bz2//g')  
-          sudo tar -xf $source_file
-          cd $source_dir
-          test -f .config || sudo make oldconfig
-          sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare V=0
-          ls -al /usr/src/$source_dir
         shell: bash
+
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
           fetch-depth: 0
+
+      # 关键步骤：处理你提供的 kheaders.tar.xz
+      # 假设该文件存放在仓库根目录，或者通过其他方式下载
+      - name: Prepare Custom Kernel Headers
+        id: kernel_headers
+        run: |
+          if [ -f "./kheaders.tar.xz" ]; then
+            echo "✅ Found custom kheaders.tar.xz"
+            mkdir -p ${{ github.workspace }}/custom_headers
+            tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
+            
+            # 自动寻找包含 Makefile 的目录作为源码根目录
+            REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name Makefile -exec dirname {} + | head -n 1)
+            echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
+            echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
+            
+            # 执行内核头文件预处理（对应 Makefile 中的 prepare 目标）
+            cd $REAL_PATH
+            # 针对你的目标架构执行 prepare，这里以 arm64 为例
+            # 如果是 Android 环境，可能需要特定的 ARCH 参数
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- prepare
+          else
+            echo "⚠️ kheaders.tar.xz not found in root, falling back to generic build"
+            echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
       - uses: actions/cache@v4
         with:
           path: |
@@ -79,99 +93,42 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
-      - name: authenticate
-        run: |
-          gh auth login --with-token <<<'${{ secrets.GITHUB_TOKEN }}'
-      - name: Get Previous Tag
-        id: previoustag
-        run: |
-          PREVIOUS=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          echo "PREVIOUS_TAG=$PREVIOUS" >> $GITHUB_OUTPUT
-      - name: Generate Release Notes
-        id: release_notes
-        run: |
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /repos/${{ github.repository }}/releases/generate-notes \
-            -f tag_name=${{ github.ref_name }} \
-            -f previous_tag_name=${{ steps.previoustag.outputs.PREVIOUS_TAG }} \
-            > release_notes.json
-          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
-          jq -r .body release_notes.json >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-      - name: Write File
-        uses: DamianReeves/write-file-action@v1.2
-        with:
-          path: ./bin/release_notes.txt
-          contents: |
-            ${{ steps.release_notes.outputs.NOTES }}
-          write-mode: append
-      - name: Release amd64
+
+      - name: Release arm64 (Non-CO-RE / nocore)
+        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
           make clean
-          make env
+          # 使用 nocore 目标编译
+          # 它会使用我们设置好的 LINUX_SOURCE_PATH 环境变量
+          CROSS_ARCH=arm64 SNAPSHOT_VERSION=${{ github.ref_name }} make nocore
+          
+          # 将生成的二进制重命名，方便区分
+          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
+        shell: bash
+
+      # 如果没有自定义头文件，则走原有的 release 流程（依赖 BTF）
+      - name: Standard Release amd64
+        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'false'
+        run: |
+          make clean
           make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
-      - name: Release arm64 (CROSS COMPILATION)
+
+      - name: Standard Release arm64
+        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'false'
         run: |
           make clean
-          make env
           CROSS_ARCH=arm64 make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
-      - name: Publish
+
+      - name: Publish to GitHub Releases
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IS_PRERELEASE: ${{ steps.release_type.outputs.IS_PRERELEASE }}
         run: |
-          make -f builder/Makefile.release publish SNAPSHOT_VERSION=${{ github.ref_name }}
-  build-docker-image:
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Check Release Type
-        id: release_type
-        run: |
-          TAG_NAME=${{ github.ref_name }}
-          if [[ "$TAG_NAME" =~ (alpha|beta|rc) ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
-            echo "🚧 Pre-release detected for Docker: $TAG_NAME"
-          else
-            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-            echo "📦 Stable release detected for Docker: $TAG_NAME"
-          fi
+          # 使用 gh 命令行工具发布 bin/ 目录下的所有文件
+          TAG=${{ github.ref_name }}
+          gh release create $TAG bin/ecapture* \
+            --title "Release $TAG" \
+            --notes-file bin/release_notes.txt \
+            $( [ "$IS_PRERELEASE" = "true" ] && echo "--prerelease" ) || \
+          gh release upload $TAG bin/ecapture* --clobber
         shell: bash
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Update submodule
-        run: git submodule update --init
-      - name: Prepare Docker Tags
-        id: docker_tags
-        run: |
-          TAGS="${{ secrets.DOCKERHUB_USERNAME }}/ecapture:${{ github.ref_name }}"
-          if [[ "${{ steps.release_type.outputs.IS_PRERELEASE }}" == "false" ]]; then
-            TAGS="${TAGS}
-          ${{ secrets.DOCKERHUB_USERNAME }}/ecapture:latest"
-            echo "📦 Adding 'latest' tag for stable release"
-          else
-            echo "🚧 Skipping 'latest' tag for pre-release"
-          fi
-          echo "TAGS<<EOF" >> $GITHUB_OUTPUT
-          echo "$TAGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          build-args: VERSION=${{ github.ref_name }}
-          file: ./builder/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ecapture:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/ecapture:buildcache,mode=max
-          tags: ${{ steps.docker_tags.outputs.TAGS }}

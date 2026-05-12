@@ -1,0 +1,448 @@
+.
+├── AGENTS.md
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── Makefile
+├── README-zh_Hans.md
+├── README.md
+├── SECURITY.md
+├── assets
+│   └── ebpf_probe_stub.go
+├── bin
+├── builder
+│   ├── Dockerfile
+│   ├── Makefile.release
+│   ├── init_env.sh
+│   └── rpmBuild.spec
+├── bytecode
+├── cli
+│   ├── LICENSE
+│   ├── cmd
+│   │   ├── bash.go
+│   │   ├── ecaptureq.go
+│   │   ├── env_detection.go
+│   │   ├── gnutls.go
+│   │   ├── gotls.go
+│   │   ├── mysqld.go
+│   │   ├── nss.go
+│   │   ├── postgres.go
+│   │   ├── root.go
+│   │   ├── tls.go
+│   │   ├── upgrade.go
+│   │   └── zsh.go
+│   ├── cobrautl
+│   │   └── help.go
+│   ├── http
+│   │   ├── config_factory.go
+│   │   ├── config_factory_ecandroid.go
+│   │   ├── config_factory_linux.go
+│   │   ├── logger.go
+│   │   ├── resp.go
+│   │   ├── server.go
+│   │   └── status_string.go
+│   └── main.go
+├── deps
+├── dist
+├── docs
+│   ├── README.md
+│   ├── beta-release-guide.md
+│   ├── compilation-zh_Hans.md
+│   ├── compilation.md
+│   ├── defense-detection.md
+│   ├── e2e-tests.md
+│   ├── event-forward-api-zh_Hans.md
+│   ├── event-forward-api.md
+│   ├── event-forward.md
+│   ├── example-outputs.md
+│   ├── minimum-privileges.md
+│   ├── performance-benchmarks.md
+│   ├── refactoring-guide.md
+│   ├── release-verification.md
+│   ├── remote-config-update-api-zh_Hans.md
+│   └── remote-config-update-api.md
+├── examples
+│   ├── ecaptureq_client
+│   │   ├── README.md
+│   │   ├── TESTING.md
+│   │   ├── go.mod
+│   │   ├── go.sum
+│   │   └── main.go
+│   └── https_client
+│       ├── golang_https.go
+│       ├── node_https.js
+│       └── python3_https.py
+├── functions.mk
+├── go.mod
+├── go.sum
+├── images
+│   ├── ecapture-architecture.png
+│   ├── ecapture-help-v0.7.4.png
+│   ├── ecapture-help-v0.8.9.svg
+│   ├── ecapture-logo-400x400.jpg
+│   ├── ecapture-logo-400x400.png
+│   ├── ecapture-logo.png
+│   ├── ecapture-pid.png
+│   ├── ecapture-user-manual-on-android.png
+│   ├── ecapture-user-manual.png
+│   ├── ecapture-wireshark-lua-plugin.png
+│   ├── how-ecapture-works.png
+│   └── wechat_gzhh.png
+├── internal
+│   ├── README.md
+│   ├── builder
+│   │   ├── config_builder.go
+│   │   └── config_builder_test.go
+│   ├── config
+│   │   ├── base_config.go
+│   │   └── base_config_test.go
+│   ├── domain
+│   │   ├── configuration.go
+│   │   ├── event.go
+│   │   ├── perf_event.go
+│   │   └── probe.go
+│   ├── errors
+│   │   ├── errors.go
+│   │   └── errors_test.go
+│   ├── events
+│   │   ├── dispatcher.go
+│   │   └── dispatcher_test.go
+│   ├── factory
+│   │   ├── probe_factory.go
+│   │   └── probe_factory_test.go
+│   ├── logger
+│   │   └── logger.go
+│   ├── output
+│   │   ├── encoders
+│   │   │   ├── encoder.go
+│   │   │   ├── json_encoder.go
+│   │   │   ├── plain_encoder.go
+│   │   │   └── protobuf_encoder.go
+│   │   └── writers
+│   │       ├── factory.go
+│   │       ├── file_writer.go
+│   │       ├── iowriter_adapter.go
+│   │       ├── keylog_writer.go
+│   │       ├── logger_writer.go
+│   │       ├── pcap_writer.go
+│   │       ├── stdout_writer.go
+│   │       ├── tcp_writer.go
+│   │       ├── websocket_writer.go
+│   │       └── writer.go
+│   └── probe
+│       ├── base
+│       │   ├── base_probe.go
+│       │   ├── base_probe_test.go
+│       │   ├── handlers
+│       │   │   ├── handlers.go
+│       │   │   ├── keylog_handler.go
+│       │   │   ├── keylog_handler_dedup_test.go
+│       │   │   ├── keylog_handler_test.go
+│       │   │   ├── pcap_handler.go
+│       │   │   ├── pcap_handler_test.go
+│       │   │   ├── text_handler.go
+│       │   │   └── text_handler_test.go
+│       │   ├── perf_reorder.go
+│       │   └── perf_reorder_test.go
+│       ├── bash
+│       │   ├── bash_probe.go
+│       │   ├── bash_test.go
+│       │   ├── config.go
+│       │   ├── event.go
+│       │   └── register.go
+│       ├── gnutls
+│       │   ├── config.go
+│       │   ├── config_test.go
+│       │   ├── event.go
+│       │   ├── event_masterkey.go
+│       │   ├── gnutls_probe.go
+│       │   ├── gnutls_probe_test.go
+│       │   └── register.go
+│       ├── gotls
+│       │   ├── config.go
+│       │   ├── config_iface.go
+│       │   ├── config_iface_test.go
+│       │   ├── config_symbol.go
+│       │   ├── config_symbol_test.go
+│       │   ├── config_test.go
+│       │   ├── event.go
+│       │   ├── event_masterkey.go
+│       │   ├── event_packet.go
+│       │   ├── event_test.go
+│       │   ├── go_instructions_amd64.go
+│       │   ├── go_instructions_arm64.go
+│       │   ├── gotls_probe.go
+│       │   ├── gotls_probe_test.go
+│       │   └── register.go
+│       ├── mysql
+│       │   ├── config.go
+│       │   ├── event.go
+│       │   ├── mysql_probe.go
+│       │   ├── mysql_test.go
+│       │   └── register.go
+│       ├── nspr
+│       │   ├── config.go
+│       │   ├── config_test.go
+│       │   ├── event.go
+│       │   ├── event_masterkey.go
+│       │   ├── nspr_probe.go
+│       │   ├── nspr_probe_test.go
+│       │   └── register.go
+│       ├── openssl
+│       │   ├── config.go
+│       │   ├── config_ecandroid.go
+│       │   ├── config_iface.go
+│       │   ├── config_iface_test.go
+│       │   ├── config_linux.go
+│       │   ├── config_test.go
+│       │   ├── event.go
+│       │   ├── event_connect.go
+│       │   ├── event_connect_test.go
+│       │   ├── event_masterkey.go
+│       │   ├── event_packet.go
+│       │   ├── event_test.go
+│       │   ├── libs.go
+│       │   ├── openssl_probe.go
+│       │   ├── openssl_probe_test.go
+│       │   └── register.go
+│       ├── postgres
+│       │   ├── config.go
+│       │   ├── event.go
+│       │   ├── postgres_probe.go
+│       │   ├── postgres_test.go
+│       │   └── register.go
+│       └── zsh
+│           ├── config.go
+│           ├── event.go
+│           ├── register.go
+│           ├── zsh_probe.go
+│           └── zsh_test.go
+├── kern
+│   ├── README.md
+│   ├── bash_kern.c
+│   ├── boringssl_a_13_kern.c
+│   ├── boringssl_a_14_kern.c
+│   ├── boringssl_a_15_kern.c
+│   ├── boringssl_a_16_kern.c
+│   ├── boringssl_const.h
+│   ├── boringssl_masterkey.h
+│   ├── boringssl_na_kern.c
+│   ├── bpf
+│   │   ├── arm64
+│   │   │   ├── vmlinux.h
+│   │   │   └── vmlinux_614.h
+│   │   ├── bpf_core_read.h
+│   │   ├── bpf_endian.h
+│   │   ├── bpf_helper_defs.h
+│   │   ├── bpf_helpers.h
+│   │   ├── bpf_tracing.h
+│   │   └── x86
+│   │       ├── vmlinux.h
+│   │       └── vmlinux_614.h
+│   ├── common.h
+│   ├── core_fixes.bpf.h
+│   ├── ecapture.h
+│   ├── gnutls.h
+│   ├── gnutls_3_6_12_kern.c
+│   ├── gnutls_3_6_13_kern.c
+│   ├── gnutls_3_7_0_kern.c
+│   ├── gnutls_3_7_3_kern.c
+│   ├── gnutls_3_7_7_kern.c
+│   ├── gnutls_3_8_4_kern.c
+│   ├── gnutls_3_8_7_kern.c
+│   ├── gnutls_masterkey.h
+│   ├── go_argument.h
+│   ├── gotls_kern.c
+│   ├── include
+│   │   ├── openssl_masterkey_common.h
+│   │   └── tls_constants.h
+│   ├── mysqld_kern.c
+│   ├── nspr_kern.c
+│   ├── openssl.h
+│   ├── openssl_1_0_2a_kern.c
+│   ├── openssl_1_1_0a_kern.c
+│   ├── openssl_1_1_1a_kern.c
+│   ├── openssl_1_1_1b_kern.c
+│   ├── openssl_1_1_1d_kern.c
+│   ├── openssl_1_1_1j_kern.c
+│   ├── openssl_3_0_0_kern.c
+│   ├── openssl_3_0_12_kern.c
+│   ├── openssl_3_1_0_kern.c
+│   ├── openssl_3_2_0_kern.c
+│   ├── openssl_3_2_3_kern.c
+│   ├── openssl_3_2_4_kern.c
+│   ├── openssl_3_3_0_kern.c
+│   ├── openssl_3_3_2_kern.c
+│   ├── openssl_3_3_3_kern.c
+│   ├── openssl_3_4_0_kern.c
+│   ├── openssl_3_4_1_kern.c
+│   ├── openssl_3_5_0_kern.c
+│   ├── openssl_masterkey.h
+│   ├── openssl_masterkey_3.0.h
+│   ├── openssl_masterkey_3.2.h
+│   ├── postgres_kern.c
+│   ├── tc.h
+│   └── zsh_kern.c
+├── lib
+│   └── libpcap
+├── main.go
+├── pkg
+│   ├── ecaptureq
+│   │   ├── README.md
+│   │   ├── client.go
+│   │   ├── hub.go
+│   │   └── server.go
+│   ├── event_processor
+│   │   ├── base_event.go
+│   │   ├── event.go
+│   │   ├── http2_request.go
+│   │   ├── http2_request_test.go
+│   │   ├── http2_response.go
+│   │   ├── http2_response_test.go
+│   │   ├── http_request.go
+│   │   ├── http_response.go
+│   │   ├── http_response_test.go
+│   │   ├── iparser.go
+│   │   ├── iworker.go
+│   │   ├── processor.go
+│   │   ├── processor_test.go
+│   │   └── testdata
+│   │       ├── 952253291192473.bin
+│   │       ├── 952253597324253.bin
+│   │       ├── 952253597628796.bin
+│   │       ├── 952253698000000.bin
+│   │       ├── 952253698001000.bin
+│   │       ├── 952253698002000.bin
+│   │       ├── 952282673103459.bin
+│   │       ├── 952282712204824.bin
+│   │       ├── 952282715334491.bin
+│   │       ├── 952282731469385.bin
+│   │       ├── 952282736644923.bin
+│   │       ├── 952282737583175.bin
+│   │       ├── 952293599178141.bin
+│   │       ├── 952293616935735.bin
+│   │       ├── 952293616935736.bin
+│   │       ├── 952293616935737.bin
+│   │       ├── 952293616935738.bin
+│   │       ├── 952293616935739.bin
+│   │       ├── 952293616935740.bin
+│   │       ├── 952293617095621.bin
+│   │       └── all.json
+│   ├── proc
+│   │   ├── go_elf
+│   │   │   ├── eprint.go
+│   │   │   └── gccgo.go
+│   │   ├── proc.go
+│   │   └── proc_test.go
+│   ├── upgrade
+│   │   ├── github_response.go
+│   │   ├── upgrade.go
+│   │   └── upgrade_test.go
+│   └── util
+│       ├── ebpf
+│       │   ├── bpf.go
+│       │   ├── bpf_ecandroid.go
+│       │   ├── bpf_linux.go
+│       │   ├── bpf_test.go
+│       │   ├── cgroup_ecandroid.go
+│       │   ├── cgroup_linux.go
+│       │   ├── cgroup_test.go
+│       │   ├── config.gz
+│       │   ├── elibpcap.go
+│       │   ├── elibpcap_stub.go
+│       │   └── parse.go
+│       ├── ethernet
+│       │   └── trailer.go
+│       ├── hkdf
+│       │   ├── hkdf.go
+│       │   └── hkdf_test.go
+│       ├── kernel
+│       │   ├── kernel_version.go
+│       │   ├── kernel_version_unsupport.go
+│       │   └── version.go
+│       ├── roratelog
+│       │   └── rorate.go
+│       └── ws
+│           ├── client.go
+│           ├── client_test.go
+│           ├── server.go
+│           └── server_test.go
+├── protobuf
+│   ├── PROTOCOLS-zh_Hans.md
+│   ├── PROTOCOLS.md
+│   ├── README-zh_Hans.md
+│   ├── README.md
+│   ├── gen
+│   │   └── v1
+│   │       └── ecaptureq.pb.go
+│   └── proto
+│       └── v1
+│           └── ecaptureq.proto
+├── test
+│   ├── e2e
+│   │   ├── IMPLEMENTATION_STATUS.md
+│   │   ├── QUICK_REFERENCE.md
+│   │   ├── README.md
+│   │   ├── android
+│   │   │   ├── android_bash_e2e_test.sh
+│   │   │   ├── android_gotls_e2e_test.sh
+│   │   │   ├── android_tls_e2e_test.sh
+│   │   │   ├── build_android_tests.sh
+│   │   │   ├── common_android.sh
+│   │   │   ├── run_android_e2e_tests.sh
+│   │   │   └── setup_android_env.sh
+│   │   ├── bash_advanced_test.sh
+│   │   ├── bash_e2e_test.sh
+│   │   ├── common.sh
+│   │   ├── ecaptureq_e2e_test.sh
+│   │   ├── edge_cases_test.sh
+│   │   ├── gnutls_e2e_test.sh
+│   │   ├── go_https_client.go
+│   │   ├── gotls_advanced_test.sh
+│   │   ├── gotls_e2e_test.sh
+│   │   ├── mysql_advanced_test.sh
+│   │   ├── mysql_e2e_test.sh
+│   │   ├── postgres_e2e_test.sh
+│   │   ├── run_e2e.sh
+│   │   ├── tls_e2e_test.sh
+│   │   ├── tls_keylog_advanced_test.sh
+│   │   ├── tls_pcap_advanced_test.sh
+│   │   ├── tls_text_advanced_test.sh
+│   │   └── zsh_e2e_test.sh
+│   └── issue_463
+│       ├── Makefile
+│       ├── main.c
+│       └── readme.md
+├── tree.txt
+├── utils
+│   ├── README-zh_Hans.md
+│   ├── README.md
+│   ├── boringssl-offset.c
+│   ├── boringssl_android_offset.sh
+│   ├── boringssl_non_android_offset.sh
+│   ├── ecapture.lua
+│   ├── gnutls_offset.c
+│   ├── gnutls_offset.sh
+│   ├── openssl_1_0_2_offset.c
+│   ├── openssl_1_1_0_offset.c
+│   ├── openssl_1_1_1_offset.c
+│   ├── openssl_3_0_offset.c
+│   ├── openssl_3_2_0_offset.c
+│   ├── openssl_3_5_0_offset.c
+│   ├── openssl_offset_1.0.2.sh
+│   ├── openssl_offset_1.1.0.sh
+│   ├── openssl_offset_1.1.1.sh
+│   ├── openssl_offset_3.0.sh
+│   ├── openssl_offset_3.1.sh
+│   ├── openssl_offset_3.2.sh
+│   ├── openssl_offset_3.3.sh
+│   ├── openssl_offset_3.4.sh
+│   ├── openssl_offset_3.5.sh
+│   └── protobuf_visualizer
+│       ├── README.md
+│       ├── README_CN.md
+│       └── pb_debugger.go
+└── variables.mk
+
+70 directories, 376 files

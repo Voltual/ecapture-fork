@@ -24,6 +24,24 @@ import (
 )
 
 func detectKernel() error {
+	// 系统内核版本检测
+	kv, err := kernel.HostVersion()
+	if err != nil {
+		return fmt.Errorf("failed to get the host kernel version: %w", err)
+	}
+	switch runtime.GOARCH {
+	case "amd64":
+		if kv < kernel.VersionCode(4, 18, 0) {
+			return fmt.Errorf("the Linux/Android Kernel version %v (x86_64) is not supported. Requires a version greater than 4.18", kv)
+		}
+	case "arm64":
+		if kv < kernel.VersionCode(5, 5, 0) {
+			return fmt.Errorf("the Linux/Android Kernel version %v (aarch64) is not supported. Requires a version greater than 5.5", kv)
+		}
+	default:
+		return fmt.Errorf("unsupported CPU arch:%v", runtime.GOARCH)
+	}
+
 	return nil
 }
 func detectBpfCap() error {

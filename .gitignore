@@ -6,7 +6,6 @@
 *.dylib
 *.d
 *.o
-*.bak
 
 # Test binary, built with `go test -c`
 *.test
