@@ -87,14 +87,6 @@ jobs:
             cd ../..
           fi
           
-          # 再次验证
-          if [ -f "lib/libpcap/configure" ]; then
-            echo "✅ lib/libpcap is ready"
-            ls -la lib/libpcap/ | head -20
-          else
-            echo "❌ Failed to initialize lib/libpcap"
-            exit 1
-          fi
         shell: bash
 
       - name: Prepare Custom Kernel Headers
