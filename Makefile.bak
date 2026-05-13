@@ -176,17 +176,7 @@ assets_noncore: \
 # Build libpcap static library
 .PHONY: $(TARGET_LIBPCAP)
 $(TARGET_LIBPCAP):
-	test -f ./lib/libpcap/configure || ( \
-		git submodule update --init && \
-		cd lib/libpcap && \
-		if [ ! -f "./configure" ]; then \
-			if [ -f "./autogen.sh" ]; then \
-				./autogen.sh; \
-			else \
-				autoreconf -f -i; \
-			fi; \
-		fi \
-	)
+	test -f ./lib/libpcap/configure || git submodule update --init
 	cd lib/libpcap && \
 		CC=$(CMD_CC_PREFIX)$(CMD_CC) AR=$(CMD_AR_PREFIX)$(CMD_AR) CFLAGS="-O2 -g -gdwarf-4 -static -Wno-unused-result" ./configure --disable-rdma --disable-shared --disable-usb \
 			--disable-netmap --disable-bluetooth --disable-dbus --without-libnl \
