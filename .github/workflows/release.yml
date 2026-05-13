@@ -95,7 +95,7 @@ jobs:
           echo -e "#ifndef __PT_REGS_PARM1\n#define __PT_REGS_PARM1(x) (x->regs[0])\n#endif" >> vmlinux.h
         shell: bash
 
-      - name: Build arm64 (Non-CO-RE)
+      - name: Build Android arm64 (Non-CO-RE)
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
           CLANG_INTERNAL_INC=$(clang -print-resource-dir)/include
@@ -104,11 +104,12 @@ jobs:
           make clean
           make nocore CROSS_ARCH=arm64 SNAPSHOT_VERSION=${{ github.ref_name }} \
             KERNEL_HEADER_GEN="true" \
+            ANDROID=1 \
             EXTRA_CFLAGS_NOCORE="-isystem $CLANG_INTERNAL_INC -D__KERNEL__ -D__BPF_TRACING__ -D__TARGET_ARCH_arm64" \
             LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }} \
             KERN_SRC_PATH=${{ env.KERN_SRC_PATH }} \
             KERN_BUILD_PATH=${{ env.KERN_BUILD_PATH }}
-          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
+          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-android-arm64-nocore
         shell: bash
 
       - name: Standard Build (Normal)
