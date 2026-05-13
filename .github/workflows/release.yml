@@ -7,6 +7,10 @@ on:
     tags:
       - "v*"
 
+# 显式声明权限，解决 403 错误
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -15,10 +19,6 @@ jobs:
   build-on-ubuntu-latest:
     runs-on: ubuntu-latest
     name: Release Linux/Android (amd64/arm64)
-    permissions:
-      contents: write  # 重要：授予写入权限
-      packages: write
-      
     steps:
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -44,22 +44,9 @@ jobs:
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install --yes \
-            build-essential \
-            pkgconf \
-            libelf-dev \
-            llvm-14 \
-            clang-14 \
-            linux-tools-common \
-            gcc \
-            gcc-aarch64-linux-gnu \
-            libpcap-dev \
-            git \
-            make \
-            autoconf \
-            automake \
-            libtool
+            build-essential pkgconf libelf-dev llvm-14 clang-14 \
+            linux-tools-common gcc gcc-aarch64-linux-gnu libpcap-dev git make
           
-          # 建立工具软链接
           for tool in "clang" "llc" "llvm-strip" "bpftool"; do
             sudo rm -f /usr/bin/$tool
             sudo ln -s /usr/bin/$tool-14 /usr/bin/$tool || true
@@ -73,34 +60,14 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fix Submodules and Prepare libpcap
+      - name: Fix Submodules
         run: |
-          echo "🔍 Checking submodule status before fix..."
-          git submodule status
-          
-          # 手动初始化并更新子模块
           git submodule sync --recursive
           git submodule update --init --recursive --force
-          
-          # 检查并修复 libpcap
-          if [ -d "lib/libpcap" ]; then
-            echo "📦 Preparing libpcap configure script..."
-            cd lib/libpcap
-            
-            # 如果没有 configure，运行 autogen.sh
-            if [ ! -f "./configure" ]; then
-              if [ -f "./autogen.sh" ]; then
-                ./autogen.sh
-              else
-                autoreconf -f -i
-              fi
-            fi
-            chmod +x ./configure
-            cd ../..
-            echo "✅ libpcap is ready"
-          else
-            echo "❌ lib/libpcap not found"
-            exit 1
+          if [ ! -f "lib/libpcap/configure" ]; then
+            rm -rf lib/libpcap
+            git clone https://github.com/the-tcpdump-group/libpcap.git lib/libpcap
+            cd lib/libpcap && git checkout $(git describe --tags $(git rev-list --tags --max-count=1)) && cd ../..
           fi
         shell: bash
 
@@ -108,20 +75,14 @@ jobs:
         id: kernel_headers
         run: |
           if [ -f "./kheaders.tar.xz" ]; then
-            echo "✅ Found custom kheaders.tar.xz"
             mkdir -p ${{ github.workspace }}/custom_headers
             tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
-            
             REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name "include" -type d -print -quit | sed 's/\/include$//')
-            
             echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
             echo "KERN_SRC_PATH=$REAL_PATH" >> $GITHUB_ENV
             echo "KERN_BUILD_PATH=$REAL_PATH" >> $GITHUB_ENV
             echo "HAS_CUSTOM_HEADERS=true" >> $GITHUB_OUTPUT
-            
-            echo "Headers located at: $REAL_PATH"
           else
-            echo "⚠️ kheaders.tar.xz not found, falling back to generic build"
             echo "HAS_CUSTOM_HEADERS=false" >> $GITHUB_OUTPUT
           fi
         shell: bash
@@ -130,89 +91,45 @@ jobs:
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
           cd kern/bpf/arm64/
-          if [ -f vmlinux.h ] && [ "$(cat vmlinux.h)" == "./vmlinux_614.h" ]; then
-            echo "🔧 Fixing broken vmlinux.h symlink..."
-            rm -f vmlinux.h
-            cp vmlinux_614.h vmlinux.h
-          fi
-          
-          echo "🔧 Adding ARM64 register fix..."
-          cat >> vmlinux.h << 'EOF' || true
-          #ifndef __PT_REGS_PARM1
-          #define __PT_REGS_PARM1(x) (x->regs[0])
-          #endif
-          EOF
-          cd ../../../
+          [ -f vmlinux.h ] && rm -f vmlinux.h && cp vmlinux_614.h vmlinux.h
+          echo -e "#ifndef __PT_REGS_PARM1\n#define __PT_REGS_PARM1(x) (x->regs[0])\n#endif" >> vmlinux.h
         shell: bash
 
-      - name: Release arm64 (Non-CO-RE / nocore)
+      - name: Build arm64 (Non-CO-RE)
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
           CLANG_INTERNAL_INC=$(clang -print-resource-dir)/include
-          echo "Clang internal include path: $CLANG_INTERNAL_INC"
-          
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          
           make clean
-          make nocore \
-            CROSS_ARCH=arm64 \
-            SNAPSHOT_VERSION=${{ github.ref_name }} \
+          make nocore CROSS_ARCH=arm64 SNAPSHOT_VERSION=${{ github.ref_name }} \
             KERNEL_HEADER_GEN="true" \
             EXTRA_CFLAGS_NOCORE="-isystem $CLANG_INTERNAL_INC -D__KERNEL__ -D__BPF_TRACING__ -D__TARGET_ARCH_arm64" \
             LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }} \
             KERN_SRC_PATH=${{ env.KERN_SRC_PATH }} \
             KERN_BUILD_PATH=${{ env.KERN_BUILD_PATH }}
-
-          if [ -f "bin/ecapture" ]; then
-            mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
-            echo "✅ Build successful"
-          else
-            echo "❌ Build failed"
-            ls -la bin/ || true
-            exit 1
-          fi
+          mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
         shell: bash
 
-      - name: Standard Release amd64
+      - name: Standard Build (Normal)
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'false'
         run: |
           make clean
           make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
-
-      - name: Standard Release arm64
-        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'false'
-        run: |
-          make clean
           CROSS_ARCH=arm64 make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
+        shell: bash
 
-      - name: Generate Release Notes
-        run: |
-          cat > ./bin/release_notes.txt << 'EOF'
-          ## eCapture Release ${{ github.ref_name }}
-          
-          ### 构建信息
-          - 构建时间: $(date)
-          - 构建环境: ubuntu-latest
-          
-          ### 下载说明
-          请根据您的系统架构选择对应的二进制文件：
-          - `ecapture-*-linux-amd64`: x86_64 架构 Linux 系统
-          - `ecapture-*-linux-arm64`: ARM64 架构 Linux 系统
-          EOF
-
+      # 使用 softprops/action-gh-release 替代原来的 gh release
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: "Release ${{ github.ref_name }}"
-          body_path: ./bin/release_notes.txt
-          draft: false
-          prerelease: ${{ steps.release_type.outputs.IS_PRERELEASE }}
+          # 根据之前的检测设置是否为草稿或预发布
+          draft: true
+          prerelease: ${{ steps.release_type.outputs.IS_PRERELEASE == 'true' }}
           files: |
-            bin/ecapture-*
-            bin/*.deb
-            bin/*.tar.gz
+            bin/ecapture*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

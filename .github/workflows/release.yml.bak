@@ -15,6 +15,10 @@ jobs:
   build-on-ubuntu-latest:
     runs-on: ubuntu-latest
     name: Release Linux/Android (amd64/arm64)
+    permissions:
+      contents: write  # 重要：授予写入权限
+      packages: write
+      
     steps:
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -50,7 +54,10 @@ jobs:
             gcc-aarch64-linux-gnu \
             libpcap-dev \
             git \
-            make
+            make \
+            autoconf \
+            automake \
+            libtool
           
           # 建立工具软链接
           for tool in "clang" "llc" "llvm-strip" "bpftool"; do
@@ -64,10 +71,9 @@ jobs:
         with:
           submodules: 'recursive'
           fetch-depth: 0
-          # 确保子模块使用 HTTPS 而不是 SSH
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fix Submodules (关键修复步骤)
+      - name: Fix Submodules and Prepare libpcap
         run: |
           echo "🔍 Checking submodule status before fix..."
           git submodule status
@@ -76,19 +82,26 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive --force
           
-          # 检查 lib/libpcap 是否成功拉取
-          if [ -d "lib/libpcap" ] && [ -f "lib/libpcap/configure" ]; then
-            echo "✅ lib/libpcap submodule initialized successfully"
-          else
-            echo "❌ lib/libpcap submodule is empty, trying alternative method..."
-            # 尝试直接克隆
-            rm -rf lib/libpcap
-            git clone https://github.com/the-tcpdump-group/libpcap.git lib/libpcap
+          # 检查并修复 libpcap
+          if [ -d "lib/libpcap" ]; then
+            echo "📦 Preparing libpcap configure script..."
             cd lib/libpcap
-            git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+            
+            # 如果没有 configure，运行 autogen.sh
+            if [ ! -f "./configure" ]; then
+              if [ -f "./autogen.sh" ]; then
+                ./autogen.sh
+              else
+                autoreconf -f -i
+              fi
+            fi
+            chmod +x ./configure
             cd ../..
+            echo "✅ libpcap is ready"
+          else
+            echo "❌ lib/libpcap not found"
+            exit 1
           fi
-          
         shell: bash
 
       - name: Prepare Custom Kernel Headers
@@ -99,7 +112,6 @@ jobs:
             mkdir -p ${{ github.workspace }}/custom_headers
             tar -xvf kheaders.tar.xz -C ${{ github.workspace }}/custom_headers
             
-            # 自动定位包含 'include' 目录的实际根路径
             REAL_PATH=$(find ${{ github.workspace }}/custom_headers -name "include" -type d -print -quit | sed 's/\/include$//')
             
             echo "LINUX_SOURCE_PATH=$REAL_PATH" >> $GITHUB_ENV
@@ -114,10 +126,9 @@ jobs:
           fi
         shell: bash
 
-      - name: Fix ARM64 BPF Headers (修复架构问题)
+      - name: Fix ARM64 BPF Headers
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
-          # 修复 vmlinux.h 软链接问题
           cd kern/bpf/arm64/
           if [ -f vmlinux.h ] && [ "$(cat vmlinux.h)" == "./vmlinux_614.h" ]; then
             echo "🔧 Fixing broken vmlinux.h symlink..."
@@ -125,7 +136,6 @@ jobs:
             cp vmlinux_614.h vmlinux.h
           fi
           
-          # 确保 ARM64 寄存器定义正确
           echo "🔧 Adding ARM64 register fix..."
           cat >> vmlinux.h << 'EOF' || true
           #ifndef __PT_REGS_PARM1
@@ -138,15 +148,12 @@ jobs:
       - name: Release arm64 (Non-CO-RE / nocore)
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
-          # 获取 Clang 内部头文件路径
           CLANG_INTERNAL_INC=$(clang -print-resource-dir)/include
           echo "Clang internal include path: $CLANG_INTERNAL_INC"
           
-          # 设置 ARM64 编译环境
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # 编译
           make clean
           make nocore \
             CROSS_ARCH=arm64 \
@@ -157,13 +164,11 @@ jobs:
             KERN_SRC_PATH=${{ env.KERN_SRC_PATH }} \
             KERN_BUILD_PATH=${{ env.KERN_BUILD_PATH }}
 
-          # 检查并重命名
           if [ -f "bin/ecapture" ]; then
             mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
-            echo "✅ Build successful: bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore"
+            echo "✅ Build successful"
           else
-            echo "❌ Build failed: bin/ecapture not found"
-            echo "📁 Contents of bin directory:"
+            echo "❌ Build failed"
             ls -la bin/ || true
             exit 1
           fi
@@ -181,23 +186,33 @@ jobs:
           make clean
           CROSS_ARCH=arm64 make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
 
+      - name: Generate Release Notes
+        run: |
+          cat > ./bin/release_notes.txt << 'EOF'
+          ## eCapture Release ${{ github.ref_name }}
+          
+          ### 构建信息
+          - 构建时间: $(date)
+          - 构建环境: ubuntu-latest
+          
+          ### 下载说明
+          请根据您的系统架构选择对应的二进制文件：
+          - `ecapture-*-linux-amd64`: x86_64 架构 Linux 系统
+          - `ecapture-*-linux-arm64`: ARM64 架构 Linux 系统
+          EOF
+
       - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Release ${{ github.ref_name }}"
+          body_path: ./bin/release_notes.txt
+          draft: false
+          prerelease: ${{ steps.release_type.outputs.IS_PRERELEASE }}
+          files: |
+            bin/ecapture-*
+            bin/*.deb
+            bin/*.tar.gz
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_PRERELEASE: ${{ steps.release_type.outputs.IS_PRERELEASE }}
-        run: |
-          TAG=${{ github.ref_name }}
-          # 确保 bin 目录存在，防止 gh 命令报错
-          mkdir -p bin
-          
-          # 列出所有构建产物
-          echo "📦 Build artifacts:"
-          ls -la bin/
-          
-          # 上传到 Release
-          gh release create $TAG bin/ecapture* \
-            --title "Release $TAG" \
-            --generate-notes \
-            $( [ "$IS_PRERELEASE" = "true" ] && echo "--prerelease" ) || \
-          gh release upload $TAG bin/ecapture* --clobber
-        shell: bash
