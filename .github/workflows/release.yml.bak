@@ -36,11 +36,8 @@ jobs:
 
       - name: Install Compilers
         run: |
-            # 备份并替换 sources.list
-	    sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
-    
-    # 切换到官方 Ubuntu 源（或换成清华源，国内更快）
-	    sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install --yes \
             build-essential \
