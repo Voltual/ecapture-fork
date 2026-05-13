@@ -46,7 +46,9 @@ jobs:
             linux-tools-common \
             gcc \
             gcc-aarch64-linux-gnu \
-            libpcap-dev
+            libpcap-dev \
+            git \
+            make
           
           # 建立工具软链接
           for tool in "clang" "llc" "llvm-strip" "bpftool"; do
@@ -60,6 +62,40 @@ jobs:
         with:
           submodules: 'recursive'
           fetch-depth: 0
+          # 确保子模块使用 HTTPS 而不是 SSH
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fix Submodules (关键修复步骤)
+        run: |
+          echo "🔍 Checking submodule status before fix..."
+          git submodule status
+          
+          # 手动初始化并更新子模块
+          git submodule sync --recursive
+          git submodule update --init --recursive --force
+          
+          # 检查 lib/libpcap 是否成功拉取
+          if [ -d "lib/libpcap" ] && [ -f "lib/libpcap/configure" ]; then
+            echo "✅ lib/libpcap submodule initialized successfully"
+          else
+            echo "❌ lib/libpcap submodule is empty, trying alternative method..."
+            # 尝试直接克隆
+            rm -rf lib/libpcap
+            git clone https://github.com/the-tcpdump-group/libpcap.git lib/libpcap
+            cd lib/libpcap
+            git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+            cd ../..
+          fi
+          
+          # 再次验证
+          if [ -f "lib/libpcap/configure" ]; then
+            echo "✅ lib/libpcap is ready"
+            ls -la lib/libpcap/ | head -20
+          else
+            echo "❌ Failed to initialize lib/libpcap"
+            exit 1
+          fi
+        shell: bash
 
       - name: Prepare Custom Kernel Headers
         id: kernel_headers
@@ -84,40 +120,57 @@ jobs:
           fi
         shell: bash
 
-      - name: Release arm64 (Non-CO-RE / nocore)
+      - name: Fix ARM64 BPF Headers (修复架构问题)
         if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
         run: |
-          # 1. 强制初始化子模块
-          git submodule update --init --recursive
-
-          # 2. 修复 vmlinux.h 软链接问题
+          # 修复 vmlinux.h 软链接问题
           cd kern/bpf/arm64/
           if [ -f vmlinux.h ] && [ "$(cat vmlinux.h)" == "./vmlinux_614.h" ]; then
             echo "🔧 Fixing broken vmlinux.h symlink..."
+            rm -f vmlinux.h
             cp vmlinux_614.h vmlinux.h
           fi
+          
+          # 确保 ARM64 寄存器定义正确
+          echo "🔧 Adding ARM64 register fix..."
+          cat >> vmlinux.h << 'EOF' || true
+          #ifndef __PT_REGS_PARM1
+          #define __PT_REGS_PARM1(x) (x->regs[0])
+          #endif
+          EOF
           cd ../../../
+        shell: bash
 
-          # 3. 获取 Clang 内部头文件路径
+      - name: Release arm64 (Non-CO-RE / nocore)
+        if: steps.kernel_headers.outputs.HAS_CUSTOM_HEADERS == 'true'
+        run: |
+          # 获取 Clang 内部头文件路径
           CLANG_INTERNAL_INC=$(clang -print-resource-dir)/include
           echo "Clang internal include path: $CLANG_INTERNAL_INC"
-
-          # 4. 执行编译
+          
+          # 设置 ARM64 编译环境
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 编译
           make clean
           make nocore \
             CROSS_ARCH=arm64 \
             SNAPSHOT_VERSION=${{ github.ref_name }} \
             KERNEL_HEADER_GEN="true" \
-            EXTRA_CFLAGS_NOCORE="-isystem $CLANG_INTERNAL_INC -D__KERNEL__ -D__BPF_TRACING__" \
+            EXTRA_CFLAGS_NOCORE="-isystem $CLANG_INTERNAL_INC -D__KERNEL__ -D__BPF_TRACING__ -D__TARGET_ARCH_arm64" \
             LINUX_SOURCE_PATH=${{ env.LINUX_SOURCE_PATH }} \
             KERN_SRC_PATH=${{ env.KERN_SRC_PATH }} \
             KERN_BUILD_PATH=${{ env.KERN_BUILD_PATH }}
 
-          # 5. 检查并重命名
+          # 检查并重命名
           if [ -f "bin/ecapture" ]; then
             mv bin/ecapture bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore
+            echo "✅ Build successful: bin/ecapture-${{ github.ref_name }}-linux-arm64-nocore"
           else
             echo "❌ Build failed: bin/ecapture not found"
+            echo "📁 Contents of bin directory:"
+            ls -la bin/ || true
             exit 1
           fi
         shell: bash
@@ -142,6 +195,12 @@ jobs:
           TAG=${{ github.ref_name }}
           # 确保 bin 目录存在，防止 gh 命令报错
           mkdir -p bin
+          
+          # 列出所有构建产物
+          echo "📦 Build artifacts:"
+          ls -la bin/
+          
+          # 上传到 Release
           gh release create $TAG bin/ecapture* \
             --title "Release $TAG" \
             --generate-notes \
