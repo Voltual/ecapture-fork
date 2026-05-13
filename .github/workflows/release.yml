@@ -181,23 +181,22 @@ jobs:
           make clean
           CROSS_ARCH=arm64 make -f builder/Makefile.release release SNAPSHOT_VERSION=${{ github.ref_name }}
 
-      - name: Publish to GitHub Releases
+     - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.BUILD_VERSION }}
+          name: "eCapture Build ${{ steps.version.outputs.BUILD_VERSION }}"
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ### 🛠 构建信息 (Build Info)
+            - **Commit SHA**: `${{ github.sha }}`
+            - **Build Time**: `${{ steps.version.outputs.TIMESTAMP }}`
+            - **Platform**: Linux/Android (amd64, arm64)
+            
+            > 这是基于 master 分支的自动构建版本。
+          files: |
+            bin/ecapture*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_PRERELEASE: ${{ steps.release_type.outputs.IS_PRERELEASE }}
-        run: |
-          TAG=${{ github.ref_name }}
-          # 确保 bin 目录存在，防止 gh 命令报错
-          mkdir -p bin
-          
-          # 列出所有构建产物
-          echo "📦 Build artifacts:"
-          ls -la bin/
-          
-          # 上传到 Release
-          gh release create $TAG bin/ecapture* \
-            --title "Release $TAG" \
-            --generate-notes \
-            $( [ "$IS_PRERELEASE" = "true" ] && echo "--prerelease" ) || \
-          gh release upload $TAG bin/ecapture* --clobber
-        shell: bash

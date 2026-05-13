@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-on-ubuntu2204:
-    runs-on: ubuntu-22.04
+  build-on-ubuntu-latest:
+    runs-on: ubuntu-latest
     name: Release Linux/Android (amd64/arm64)
     steps:
       - name: Setup Go
